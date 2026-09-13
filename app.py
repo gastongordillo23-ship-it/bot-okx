@@ -3,18 +3,17 @@ import time
 from threading import Thread
 import ccxt
 import pandas as pd
-import pandas_ta as ta
 from flask import Flask, jsonify
 
 app = Flask(__name__)
 
 # Configuración de parámetros de la estrategia
-SYMBOL = 'SOL/USDT'      # Par a operar (o 'DOGE/USDT')
+SYMBOL = 'SOL/USDT'      # Par a operar
 TIMEFRAME = '15m'        # Temporalidad del gráfico
 AMOUNT_USDT = 5.0        # Capital por operación en USDT
 CHECK_INTERVAL = 60      # Revisar el mercado cada 60 segundos
 
-# Inicializar cliente de OKX con tus variables de entorno
+# Inicializar cliente de OKX
 exchange = ccxt.okx({
     'apiKey': os.environ.get("OKX_API_KEY"),
     'secret': os.environ.get("OKX_SECRET_KEY"),
@@ -30,12 +29,12 @@ def check_strategy_and_trade():
         bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=250)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         
-        # 2. Calcular los indicadores
-        df['ema9'] = ta.ema(df['close'], length=9)
-        df['ema21'] = ta.ema(df['close'], length=21)
-        df['sma200'] = ta.sma(df['close'], length=200)
+        # 2. Calcular los indicadores directamente con Pandas (sin dependencias numba)
+        df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+        df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
+        df['sma200'] = df['close'].rolling(window=200).mean()
 
-        # Usamos la penúltima vela (índice -2) porque la última (índice -1) aún no ha cerrado
+        # Tomar la penúltima y última vela cerrada
         prev_close = df['close'].iloc[-3]
         last_close = df['close'].iloc[-2]
 
@@ -47,27 +46,27 @@ def check_strategy_and_trade():
 
         last_sma200 = df['sma200'].iloc[-2]
 
-        # 3. Detectar cruces de medias
+        # 3. Detectar cruces
         crossover = (prev_ema9 <= prev_ema21) and (last_ema9 > last_ema21)   # Cruce alcista
         crossunder = (prev_ema9 >= prev_ema21) and (last_ema9 < last_ema21)  # Cruce bajista
         trend_filter = last_close > last_sma200                             # Filtro SMA 200
 
-        # 4. Consultar saldo en la cuenta Spot
+        # 4. Consultar saldo Spot
         balance = exchange.fetch_balance()
-        base_coin = SYMBOL.split('/')[0]  # Ej: 'SOL'
+        base_coin = SYMBOL.split('/')[0]
         coin_balance = balance['free'].get(base_coin, 0.0)
         usdt_balance = balance['free'].get('USDT', 0.0)
 
         # --- SEÑAL DE COMPRA ---
         if crossover and trend_filter and coin_balance < (AMOUNT_USDT / last_close) * 0.5:
             if usdt_balance >= AMOUNT_USDT:
-                print(f"[SEÑAL COMPRA] Cruce alcista detectado en {SYMBOL}. Comprando {AMOUNT_USDT} USDT...")
+                print(f"[SEÑAL COMPRA] Cruce alcista en {SYMBOL}. Comprando {AMOUNT_USDT} USDT...")
                 order = exchange.create_market_buy_order_requires_price(SYMBOL, AMOUNT_USDT)
                 print("Orden ejecutada con éxito:", order['id'])
 
         # --- SEÑAL DE VENTA / CIERRE ---
         elif crossunder and coin_balance > 0.001:
-            print(f"[SEÑAL VENTA] Cruce bajista detectado en {SYMBOL}. Vendiendo {coin_balance} {base_coin}...")
+            print(f"[SEÑAL VENTA] Cruce bajista en {SYMBOL}. Vendiendo {coin_balance} {base_coin}...")
             order = exchange.create_market_sell_order(SYMBOL, coin_balance)
             print("Posición cerrada con éxito:", order['id'])
 
@@ -75,12 +74,10 @@ def check_strategy_and_trade():
         print("Error al verificar la estrategia:", str(e))
 
 def bot_loop():
-    """Bucle principal que corre en segundo plano en Render"""
     while True:
         check_strategy_and_trade()
         time.sleep(CHECK_INTERVAL)
 
-# Iniciar el bot en un hilo de ejecución independiente al arrancar el servidor
 bot_thread = Thread(target=bot_loop, daemon=True)
 bot_thread.start()
 
