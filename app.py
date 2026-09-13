@@ -8,7 +8,7 @@ from flask import Flask, jsonify
 app = Flask(__name__)
 
 # Configuración de parámetros de la estrategia
-SYMBOL = 'SOL/USDT'      # Par a operar
+SYMBOL = 'BTC/USDT'      # Par a operar
 TIMEFRAME = '15m'        # Temporalidad del gráfico
 AMOUNT_USDT = 5.0        # Capital por operación en USDT
 CHECK_INTERVAL = 60      # Revisar el mercado cada 60 segundos
