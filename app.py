@@ -10,7 +10,7 @@ app = Flask(__name__)
 # Configuración de parámetros de la estrategia
 SYMBOL = 'BTC/USDT'      # Par a operar
 TIMEFRAME = '15m'        # Temporalidad del gráfico
-AMOUNT_USDT = 17      # Capital por operación en USDT
+AMOUNT_USDT = 17         # Capital por operación en USDT
 CHECK_INTERVAL = 60      # Revisar el mercado cada 60 segundos
 
 # Inicializar cliente de OKX
@@ -29,7 +29,7 @@ def check_strategy_and_trade():
         bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=250)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         
-        # 2. Calcular los indicadores directamente con Pandas (sin dependencias numba)
+        # 2. Calcular los indicadores directamente con Pandas
         df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
         df['sma200'] = df['close'].rolling(window=200).mean()
@@ -61,13 +61,22 @@ def check_strategy_and_trade():
         if crossover and trend_filter and coin_balance < (AMOUNT_USDT / last_close) * 0.5:
             if usdt_balance >= AMOUNT_USDT:
                 print(f"[SEÑAL COMPRA] Cruce alcista en {SYMBOL}. Comprando {AMOUNT_USDT} USDT...")
-                order = exchange.create_market_buy_order_requires_price(SYMBOL, AMOUNT_USDT)
+                
+                # Ejecución correcta en CCXT pasando el costo en USDT mediante params
+                order = exchange.create_market_buy_order(
+                    symbol=SYMBOL,
+                    amount=None,  # Se deja None al especificar 'cost' en params para mercado
+                    params={'cost': AMOUNT_USDT}
+                )
                 print("Orden ejecutada con éxito:", order['id'])
 
         # --- SEÑAL DE VENTA / CIERRE ---
         elif crossunder and coin_balance > 0.001:
-            print(f"[SEÑAL VENTA] Cruce bajista en {SYMBOL}. Vendiendo {coin_balance} {base_coin}...")
-            order = exchange.create_market_sell_order(SYMBOL, coin_balance)
+            # Formatear la cantidad según las reglas de precisión del exchange
+            sell_amount = exchange.amount_to_precision(SYMBOL, coin_balance)
+            print(f"[SEÑAL VENTA] Cruce bajista en {SYMBOL}. Vendiendo {sell_amount} {base_coin}...")
+            
+            order = exchange.create_market_sell_order(SYMBOL, sell_amount)
             print("Posición cerrada con éxito:", order['id'])
 
     except Exception as e:
@@ -75,7 +84,10 @@ def check_strategy_and_trade():
 
 def bot_loop():
     while True:
-        check_strategy_and_trade()
+        try:
+            check_strategy_and_trade()
+        except Exception as e:
+            print(f"Error inesperado en el ciclo principal: {e}")
         time.sleep(CHECK_INTERVAL)
 
 bot_thread = Thread(target=bot_loop, daemon=True)
