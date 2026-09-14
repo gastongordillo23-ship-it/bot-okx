@@ -18,18 +18,22 @@ CHECK_INTERVAL = 60      # Revisar el mercado cada 60 segundos
 STOP_LOSS_PCT = 0.02     # 2% de pérdida máxima
 TAKE_PROFIT_PCT = 0.04   # 4% de ganancia objetivo
 
-# Parámetros de Filtros
-ADX_THRESHOLD = 22       # Mínima fuerza de tendencia para operar (Evita rangos)
-RSI_MAX_BUY = 65         # No comprar si el RSI supera este nivel (Evita sobrecompra)
+# Parámetros de Filtros (Optimizados para BTC/USDT 15m)
+ADX_LENGTH = 11          # Periodos para ADX (11 o 14)
+ADX_THRESHOLD = 23       # Mínima fuerza de tendencia para operar (Evita rangos)
+
+RSI_LENGTH = 14          # Periodos para RSI
+RSI_MIN_BUY = 50         # Requiere fuerza alcista real
+RSI_MAX_BUY = 68         # Evita comprar en zonas de sobrecompra
 
 entry_price = None
 
-def calculate_adx_and_rsi(df, length=14):
+def calculate_adx_and_rsi(df, adx_len=11, rsi_len=14):
     """Calcula ADX y RSI de forma nativa con pandas/numpy"""
     # 1. RSI
     delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_len).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_len).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
 
@@ -45,12 +49,12 @@ def calculate_adx_and_rsi(df, length=14):
     df['plus_dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
     df['minus_dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
 
-    tr_s = df['tr'].ewm(alpha=1/length, adjust=False).mean()
-    plus_di = 100 * (df['plus_dm'].ewm(alpha=1/length, adjust=False).mean() / tr_s)
-    minus_di = 100 * (df['minus_dm'].ewm(alpha=1/length, adjust=False).mean() / tr_s)
+    tr_s = df['tr'].ewm(alpha=1/adx_len, adjust=False).mean()
+    plus_di = 100 * (df['plus_dm'].ewm(alpha=1/adx_len, adjust=False).mean() / tr_s)
+    minus_di = 100 * (df['minus_dm'].ewm(alpha=1/adx_len, adjust=False).mean() / tr_s)
 
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
-    df['adx'] = dx.ewm(alpha=1/length, adjust=False).mean()
+    df['adx'] = dx.ewm(alpha=1/adx_len, adjust=False).mean()
     
     return df
 
@@ -82,7 +86,7 @@ def check_strategy_and_trade():
         df['sma200'] = df['close'].rolling(window=200).mean()
         
         # Agregar ADX y RSI
-        df = calculate_adx_and_rsi(df, length=14)
+        df = calculate_adx_and_rsi(df, adx_len=ADX_LENGTH, rsi_len=RSI_LENGTH)
 
         current_price = float(df['close'].iloc[-1])
         last_close = float(df['close'].iloc[-2])
@@ -104,11 +108,11 @@ def check_strategy_and_trade():
         # Filtros de Calidad
         trend_filter = last_close > last_sma200
         adx_filter = last_adx >= ADX_THRESHOLD
-        rsi_filter = last_rsi <= RSI_MAX_BUY
+        rsi_filter = (RSI_MIN_BUY <= last_rsi <= RSI_MAX_BUY)
 
         # Log de Monitoreo
         print(f"[CHECK] BTC: ${current_price:,.2f} | ADX: {last_adx:.1f} | RSI: {last_rsi:.1f} | "
-              f"Tendencia: {trend_filter} | ADX OK: {adx_filter} | RSI OK: {rsi_filter}", flush=True)
+              f"Macro: {trend_filter} | ADX OK: {adx_filter} | RSI OK: {rsi_filter}", flush=True)
 
         # 4. Consultar saldo Spot
         balance = exchange.fetch_balance()
@@ -140,7 +144,6 @@ def check_strategy_and_trade():
                 return
 
         # --- SEÑAL DE COMPRA FILTRADA ---
-        # Requiere: Cruce alcista + Precio > SMA200 + Tendencia Fuerte (ADX) + Sin Sobrecompra (RSI)
         if crossover and trend_filter and adx_filter and rsi_filter and not has_position:
             if usdt_balance >= AMOUNT_USDT:
                 print(f"[SEÑAL COMPRA] Cruce alcista validado por ADX ({last_adx:.1f}) y RSI ({last_rsi:.1f}). Comprando...", flush=True)
@@ -176,7 +179,7 @@ Thread(target=bot_loop, daemon=True).start()
 
 @app.route('/')
 def health_check():
-    return jsonify({"status": "running", "bot": "OKX Spot Bot con Filtros ADX/RSI"}), 200
+    return jsonify({"status": "running", "bot": "OKX Spot Bot con Filtros ADX/RSI (15m)"}), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
