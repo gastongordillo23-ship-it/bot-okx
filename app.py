@@ -63,6 +63,9 @@ def check_strategy_and_trade():
         crossunder = (prev_ema9 >= prev_ema21) and (last_ema9 < last_ema21)
         trend_filter = last_close > last_sma200
 
+        # Log informativo en cada ciclo para confirmar funcionamiento en Render
+        print(f"[CHECK] BTC: ${current_price:,.2f} | EMA9: ${last_ema9:,.2f} | EMA21: ${last_ema21:,.2f} | SMA200: ${last_sma200:,.2f} | Tendencia OK: {trend_filter}", flush=True)
+
         # 4. Consultar saldo Spot
         balance = exchange.fetch_balance()
         base_coin = SYMBOL.split('/')[0]
@@ -115,7 +118,6 @@ def check_strategy_and_trade():
         print(f"Error al verificar la estrategia: {str(e)}", flush=True)
 
 def bot_loop():
-    # Esperar 5 segundos antes del primer ciclo para dejar arrancar a Gunicorn
     time.sleep(5)
     while True:
         try:
