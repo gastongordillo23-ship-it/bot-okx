@@ -25,17 +25,19 @@ exchange = ccxt.okx({
 def check_strategy_and_trade():
     """Calcula las EMAs y SMA 200 y ejecuta las órdenes en OKX Spot"""
     try:
+        # Cargar reglas del mercado
+        exchange.load_markets()
+
         # 1. Obtener las últimas 250 velas de OKX
         bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=250)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         
-        # 2. Calcular los indicadores directamente con Pandas
+        # 2. Calcular los indicadores con Pandas
         df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
         df['sma200'] = df['close'].rolling(window=200).mean()
 
-        # Tomar la penúltima y última vela cerrada
-        prev_close = df['close'].iloc[-3]
+        # Tomar la penúltima (iloc[-3]) y última vela cerrada (iloc[-2])
         last_close = df['close'].iloc[-2]
 
         prev_ema9 = df['ema9'].iloc[-3]
@@ -46,7 +48,7 @@ def check_strategy_and_trade():
 
         last_sma200 = df['sma200'].iloc[-2]
 
-        # 3. Detectar cruces
+        # 3. Detectar cruces en velas cerradas
         crossover = (prev_ema9 <= prev_ema21) and (last_ema9 > last_ema21)   # Cruce alcista
         crossunder = (prev_ema9 >= prev_ema21) and (last_ema9 < last_ema21)  # Cruce bajista
         trend_filter = last_close > last_sma200                             # Filtro SMA 200
@@ -54,26 +56,28 @@ def check_strategy_and_trade():
         # 4. Consultar saldo Spot
         balance = exchange.fetch_balance()
         base_coin = SYMBOL.split('/')[0]
-        coin_balance = balance['free'].get(base_coin, 0.0)
-        usdt_balance = balance['free'].get('USDT', 0.0)
+        coin_balance = float(balance['free'].get(base_coin, 0.0))
+        usdt_balance = float(balance['free'].get('USDT', 0.0))
+
+        min_amount = exchange.market(SYMBOL)['limits']['amount']['min']
 
         # --- SEÑAL DE COMPRA ---
         if crossover and trend_filter and coin_balance < (AMOUNT_USDT / last_close) * 0.5:
             if usdt_balance >= AMOUNT_USDT:
                 print(f"[SEÑAL COMPRA] Cruce alcista en {SYMBOL}. Comprando {AMOUNT_USDT} USDT...")
                 
-                # Ejecución correcta en CCXT pasando el costo en USDT mediante params
-               # Para enviar una orden a mercado en Spot especificando el monto total en USDT:
-               order = exchange.create_market_buy_order(
-              symbol=SYMBOL,
-              amount=None,
-             params={'cost': AMOUNT_USDT}
+                # Ejecución enviando tipo 'market' con orden nativa o especificando el monto base
+                raw_amount = AMOUNT_USDT / last_close
+                target_amount = exchange.amount_to_precision(SYMBOL, raw_amount)
+
+                order = exchange.create_market_buy_order(
+                    symbol=SYMBOL,
+                    amount=target_amount
                 )
                 print("Orden ejecutada con éxito:", order['id'])
 
         # --- SEÑAL DE VENTA / CIERRE ---
-        elif crossunder and coin_balance > 0.001:
-            # Formatear la cantidad según las reglas de precisión del exchange
+        elif crossunder and coin_balance >= min_amount:
             sell_amount = exchange.amount_to_precision(SYMBOL, coin_balance)
             print(f"[SEÑAL VENTA] Cruce bajista en {SYMBOL}. Vendiendo {sell_amount} {base_coin}...")
             
