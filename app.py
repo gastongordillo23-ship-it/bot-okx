@@ -63,10 +63,11 @@ def check_strategy_and_trade():
                 print(f"[SEÑAL COMPRA] Cruce alcista en {SYMBOL}. Comprando {AMOUNT_USDT} USDT...")
                 
                 # Ejecución correcta en CCXT pasando el costo en USDT mediante params
-                order = exchange.create_market_buy_order(
-                    symbol=SYMBOL,
-                    amount=None,  # Se deja None al especificar 'cost' en params para mercado
-                    params={'cost': AMOUNT_USDT}
+               # Para enviar una orden a mercado en Spot especificando el monto total en USDT:
+               order = exchange.create_market_buy_order(
+              symbol=SYMBOL,
+              amount=None,
+             params={'cost': AMOUNT_USDT}
                 )
                 print("Orden ejecutada con éxito:", order['id'])
 
