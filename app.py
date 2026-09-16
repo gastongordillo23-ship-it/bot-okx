@@ -9,36 +9,36 @@ from flask import Flask, jsonify
 app = Flask(__name__)
 
 # ==========================================
-# CONFIGURACIÓN GENERAL Y GESTIÓN DE RIESGO
+# CONFIGURACIÓN GENERAL Y GESTIÓN DE RIESGO (4H)
 # ==========================================
 SYMBOL = 'BTC/USDT'
-TIMEFRAME = '1h'
-CHECK_INTERVAL = 60            # Frecuencia de chequeo en segundos
+TIMEFRAME = '4h'
+CHECK_INTERVAL = 300           # Chequeo cada 5 minutos
 
 # Parámetros de Riesgo Adaptativo
-RISK_PER_TRADE_USDT = 2.0      # Pérdida máxima en USDT que permitís por trade si toca el SL
-MIN_ORDER_USDT = 10.0          # Límite mínimo de orden exigido por OKX (Spot)
-MAX_ORDER_USDT = 50.0          # Techo máximo de capital a invertir por entrada
+RISK_PER_TRADE_USDT = 2.0      # Pérdida máxima en USDT por trade si salta el SL
+MIN_ORDER_USDT = 10.0          # Mínimo exigido por OKX Spot
+MAX_ORDER_USDT = 50.0          # Límite máximo de capital por entrada
 
-# Parámetros ATR
+# Parámetros ATR optimizados para 4H
 ATR_LENGTH = 14
-SL_ATR_MULT = 1.8              # Stop Loss Inicial = 1.8 * ATR
-TS_ATR_MULT = 2.2              # Trailing Stop = 2.2 * ATR
+SL_ATR_MULT = 1.5              # Stop Loss Inicial = 1.5 * ATR
+TS_ATR_MULT = 2.0              # Trailing Stop = 2.0 * ATR
 
-ADX_LENGTH = 11
-ADX_THRESHOLD = 23
+ADX_LENGTH = 14
+ADX_THRESHOLD = 20             # Umbral más flexible para capturar tendencias tempranas en 4h
 
 RSI_LENGTH = 14
-RSI_MIN_BUY = 50
-RSI_MAX_BUY = 78
+RSI_MIN_BUY = 52               # Exige ligera fuerza alcista
+RSI_MAX_BUY = 75
 
-# Variables de estado
+# Variables globales de estado
 entry_price = None
 highest_price = None
-dynamic_sl_pct = 0.025
+dynamic_sl_pct = 0.020
 dynamic_ts_pct = 0.030
 
-def calculate_indicators(df, adx_len=11, rsi_len=14, atr_len=14):
+def calculate_indicators(df, adx_len=14, rsi_len=14, atr_len=14):
     """Calcula RSI, ADX y ATR Dinámico sobre el DataFrame."""
     # 1. RSI
     delta = df['close'].diff()
@@ -97,14 +97,14 @@ def fetch_last_buy_price(exchange):
     return None
 
 def calculate_position_size(current_price, last_atr):
-    """Calcula el tamaño de posición en USDT basado en el riesgo por ATR."""
+    """Calcula el tamaño de posición en USDT basado en el riesgo por ATR en 4h."""
     sl_distance_usdt = last_atr * SL_ATR_MULT
     sl_pct = sl_distance_usdt / current_price
 
-    # Monto necesario en USDT para arriesgar exactamente RISK_PER_TRADE_USDT
+    # Monto en USDT para arriesgar exactamente RISK_PER_TRADE_USDT
     target_usdt = RISK_PER_TRADE_USDT / sl_pct
 
-    # Acotar entre los límites permitidos de OKX y de seguridad
+    # Acotar entre los límites permitidos
     target_usdt = max(MIN_ORDER_USDT, min(MAX_ORDER_USDT, target_usdt))
     return target_usdt, sl_pct
 
@@ -127,13 +127,13 @@ def check_strategy_and_trade():
         last_close = float(df['close'].iloc[-2])
         last_atr = float(df['atr'].iloc[-2])
 
-        # Recalibración dinámica del SL y TS en función de la volatilidad actual
+        # Recalibración dinámica del SL y TS (Adaptados a 4h)
         dynamic_sl_pct = (last_atr * SL_ATR_MULT) / current_price
         dynamic_ts_pct = (last_atr * TS_ATR_MULT) / current_price
 
-        # Límites de seguridad para evitar rangos anómalos
-        dynamic_sl_pct = max(0.012, min(0.050, dynamic_sl_pct))
-        dynamic_ts_pct = max(0.018, min(0.060, dynamic_ts_pct))
+        # Rango de seguridad para 4h
+        dynamic_sl_pct = max(0.015, min(0.060, dynamic_sl_pct))
+        dynamic_ts_pct = max(0.020, min(0.080, dynamic_ts_pct))
 
         prev_ema9 = float(df['ema9'].iloc[-3])
         last_ema9 = float(df['ema9'].iloc[-2])
@@ -159,13 +159,13 @@ def check_strategy_and_trade():
         min_amount = float(exchange.market(SYMBOL)['limits']['amount']['min'])
         has_position = coin_balance >= min_amount
 
-        # Recuperación de estado en reinicios de servidor
+        # Recuperación de estado tras reinicios
         if has_position and entry_price is None:
             entry_price = fetch_last_buy_price(exchange) or current_price
             highest_price = current_price
-            print(f"[RECOVERY] Posición abierta detectada. Entrada: ${entry_price:,.2f}", flush=True)
+            print(f"[RECOVERY 4H] Posición abierta detectada. Entrada: ${entry_price:,.2f}", flush=True)
 
-        print(f"[CHECK] BTC: ${current_price:,.2f} | ATR: ${last_atr:.2f} | "
+        print(f"[CHECK 4H] BTC: ${current_price:,.2f} | ATR: ${last_atr:.2f} | "
               f"SL Dynamic: {dynamic_sl_pct*100:.2f}% | TS Dynamic: {dynamic_ts_pct*100:.2f}%", flush=True)
 
         # ==========================================
@@ -196,7 +196,7 @@ def check_strategy_and_trade():
                 return
 
         # ==========================================
-        # ENTRADA EN COMPRA CON POSITION SIZING DINÁMICO
+        # ENTRADA EN COMPRA CON POSITION SIZING (4H)
         # ==========================================
         if crossover and trend_filter and adx_filter and rsi_filter and not has_position:
             target_usdt, sl_pct = calculate_position_size(current_price, last_atr)
@@ -205,29 +205,29 @@ def check_strategy_and_trade():
                 raw_btc_amount = target_usdt / current_price
                 target_amount = exchange.amount_to_precision(SYMBOL, raw_btc_amount)
 
-                print(f"[SEÑAL COMPRA] Calculado: ${target_usdt:.2f} USDT ({target_amount} BTC) | "
+                print(f"[SEÑAL COMPRA 4H] Orden: ${target_usdt:.2f} USDT ({target_amount} BTC) | "
                       f"Riesgo SL ({sl_pct*100:.2f}%): ~${RISK_PER_TRADE_USDT:.2f} USDT", flush=True)
 
                 order = exchange.create_market_buy_order(SYMBOL, target_amount)
                 entry_price = float(order.get('price', current_price)) or current_price
                 highest_price = entry_price
-                print(f"Compra ejecutada con éxito ID: {order['id']} a ${entry_price:,.2f}", flush=True)
+                print(f"Compra ejecutada éxito ID: {order['id']} a ${entry_price:,.2f}", flush=True)
             else:
-                print(f"[ALERTA COMPRA] Balance insuficiente. Requerido: ${target_usdt:.2f} USDT | Disponible: ${usdt_balance:.2f} USDT", flush=True)
+                print(f"[ALERTA 4H] Balance insuficiente. Requerido: ${target_usdt:.2f} USDT | Libre: ${usdt_balance:.2f} USDT", flush=True)
 
         # ==========================================
         # SALIDA TÉCNICA POR CRUCE BAJISTA
         # ==========================================
         elif crossunder and has_position:
             sell_amount = exchange.amount_to_precision(SYMBOL, coin_balance)
-            print(f"[SEÑAL VENTA] Cruce bajista EMA 9/21. Vendiendo {sell_amount} {base_coin}...", flush=True)
+            print(f"[SEÑAL VENTA 4H] Cruce bajista EMA 9/21. Vendiendo {sell_amount} {base_coin}...", flush=True)
             order = exchange.create_market_sell_order(SYMBOL, sell_amount)
             print(f"Orden de venta ejecutada: {order['id']}", flush=True)
             entry_price = None
             highest_price = None
 
     except Exception as e:
-        print(f"Error en chequeo: {str(e)}", flush=True)
+        print(f"Error en chequeo 4h: {str(e)}", flush=True)
 
 def bot_loop():
     time.sleep(5)
@@ -244,7 +244,7 @@ Thread(target=bot_loop, daemon=True).start()
 def health_check():
     return jsonify({
         "status": "running", 
-        "bot": "OKX Spot Bot Adaptive (ATR Position Sizing & Trailing Stop)",
+        "bot": "OKX Spot Bot Adaptive 4H (ATR Position Sizing & Trailing Stop)",
         "symbol": SYMBOL,
         "timeframe": TIMEFRAME,
         "sl_dinamico_actual": f"{dynamic_sl_pct*100:.2f}%",
