@@ -8,23 +8,27 @@ from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# Configuración de parámetros
+# ==========================================
+# CONFIGURACIÓN DE PARÁMETROS OPTIMIZADOS
+# ==========================================
 SYMBOL = 'BTC/USDT'
-TIMEFRAME = '15m'
+TIMEFRAME = '1h'               # Subido de 15m a 1h para filtrar ruido y reducir comisiones
 AMOUNT_USDT = 17
-CHECK_INTERVAL = 60
+CHECK_INTERVAL = 60            # Frecuencia de chequeo en segundos
 
-STOP_LOSS_PCT = 0.02
-TAKE_PROFIT_PCT = 0.04
+STOP_LOSS_PCT = 0.025          # Stop Loss inicial fijo del 2.5%
+TRAILING_STOP_PCT = 0.03       # Trailing Stop: vende si cae un 3% desde el punto máximo alcanzado
 
 ADX_LENGTH = 11
 ADX_THRESHOLD = 23
 
 RSI_LENGTH = 14
 RSI_MIN_BUY = 50
-RSI_MAX_BUY = 68
+RSI_MAX_BUY = 78               # Ampliado de 68 a 78 para no perder rupturas fuertes
 
+# Variables de estado de posición
 entry_price = None
+highest_price = None           # Rastrea el precio más alto alcanzado durante la posición abierta
 
 def calculate_adx_and_rsi(df, adx_len=11, rsi_len=14):
     """Calcula ADX y RSI de forma nativa controlando divisiones por cero"""
@@ -33,7 +37,6 @@ def calculate_adx_and_rsi(df, adx_len=11, rsi_len=14):
     gain = (delta.where(delta > 0, 0)).rolling(window=rsi_len).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_len).mean()
     
-    # Evitar división por cero en RS
     loss_safe = np.where(loss == 0, 1e-9, loss)
     rs = gain / loss_safe
     df['rsi'] = 100 - (100 / (1 + rs))
@@ -85,7 +88,7 @@ def fetch_last_buy_price(exchange):
     return None
 
 def check_strategy_and_trade():
-    global entry_price
+    global entry_price, highest_price
     
     try:
         exchange = get_exchange()
@@ -127,46 +130,67 @@ def check_strategy_and_trade():
         min_amount = float(exchange.market(SYMBOL)['limits']['amount']['min'])
         has_position = coin_balance >= min_amount
 
-        # Recuperar entry_price si hubo un restart
+        # Recuperar estado si el servidor reinició con posición abierta
         if has_position and entry_price is None:
-            entry_price = fetch_last_buy_price(exchange)
-            print(f"[RECOVERY] Posición detectada. Precio de compra recuperado: ${entry_price}", flush=True)
+            entry_price = fetch_last_buy_price(exchange) or current_price
+            highest_price = current_price
+            print(f"[RECOVERY] Posición detectada. Entrada recuperada: ${entry_price:,.2f}", flush=True)
 
         print(f"[CHECK] BTC: ${current_price:,.2f} | ADX: {last_adx:.1f} | RSI: {last_rsi:.1f} | "
               f"Macro: {trend_filter} | ADX OK: {adx_filter} | RSI OK: {rsi_filter}", flush=True)
 
-        # GESTIÓN DE POSICIÓN ABIERTA (SL / TP)
+        # ==========================================
+        # GESTIÓN DE POSICIÓN ABIERTA (SL / TRAILING STOP)
+        # ==========================================
         if has_position and entry_price is not None:
-            price_change = (current_price - entry_price) / entry_price
+            # Actualizar el precio pico registrado
+            if highest_price is None or current_price > highest_price:
+                highest_price = current_price
 
-            if price_change <= -STOP_LOSS_PCT or price_change >= TAKE_PROFIT_PCT:
-                action = "STOP LOSS" if price_change <= -STOP_LOSS_PCT else "TAKE PROFIT"
+            change_from_entry = (current_price - entry_price) / entry_price
+            drop_from_peak = (highest_price - current_price) / highest_price
+
+            # Condición 1: Stop Loss Inicial Fijo
+            is_stop_loss = change_from_entry <= -STOP_LOSS_PCT
+            # Condición 2: Trailing Stop desde Máximo Alcanzado
+            is_trailing_stop = (highest_price > entry_price) and (drop_from_peak >= TRAILING_STOP_PCT)
+
+            if is_stop_loss or is_trailing_stop:
+                reason = "STOP LOSS INICIAL" if is_stop_loss else f"TRAILING STOP (Caída {drop_from_peak*100:.2f}% desde pico de ${highest_price:,.2f})"
                 sell_amount = exchange.amount_to_precision(SYMBOL, coin_balance)
-                print(f"[{action}] Cambio: {price_change*100:.2f}%. Vendiendo {sell_amount} {base_coin}...", flush=True)
+                print(f"[{reason}] Ejecutando venta de {sell_amount} {base_coin} a ${current_price:,.2f}...", flush=True)
+                
                 order = exchange.create_market_sell_order(SYMBOL, sell_amount)
                 print(f"Orden ejecutada: {order['id']}", flush=True)
+                
                 entry_price = None
+                highest_price = None
                 return
 
+        # ==========================================
         # SEÑAL DE COMPRA FILTRADA
+        # ==========================================
         if crossover and trend_filter and adx_filter and rsi_filter and not has_position:
             if usdt_balance >= AMOUNT_USDT:
-                print(f"[SEÑAL COMPRA] Validada. Comprando...", flush=True)
+                print(f"[SEÑAL COMPRA] Validada. Comprando ${AMOUNT_USDT} USDT...", flush=True)
                 raw_amount = AMOUNT_USDT / current_price
                 target_amount = exchange.amount_to_precision(SYMBOL, raw_amount)
 
                 order = exchange.create_market_buy_order(SYMBOL, target_amount)
-                # Tomar el precio real ejecutado si está disponible en la respuesta del exchange
                 entry_price = float(order.get('price', current_price)) or current_price
-                print(f"Orden de compra ejecutada: {order['id']} a ${entry_price}", flush=True)
+                highest_price = entry_price
+                print(f"Orden de compra ejecutada: {order['id']} a ${entry_price:,.2f}", flush=True)
 
-        # SEÑAL DE VENTA POR CRUCE BAJISTA
+        # ==========================================
+        # SEÑAL DE VENTA POR CRUCE BAJISTA (SALIDA TÉCNICA)
+        # ==========================================
         elif crossunder and has_position:
             sell_amount = exchange.amount_to_precision(SYMBOL, coin_balance)
-            print(f"[SEÑAL VENTA] Cruce bajista en {SYMBOL}. Vendiendo...", flush=True)
+            print(f"[SEÑAL VENTA] Cruce bajista EMA 9/21. Vendiendo {sell_amount} {base_coin}...", flush=True)
             order = exchange.create_market_sell_order(SYMBOL, sell_amount)
             print(f"Orden de venta ejecutada: {order['id']}", flush=True)
             entry_price = None
+            highest_price = None
 
     except Exception as e:
         print(f"Error al verificar la estrategia: {str(e)}", flush=True)
@@ -184,7 +208,12 @@ Thread(target=bot_loop, daemon=True).start()
 
 @app.route('/')
 def health_check():
-    return jsonify({"status": "running", "bot": "OKX Spot Bot con Filtros ADX/RSI (15m)"}), 200
+    return jsonify({
+        "status": "running", 
+        "bot": "OKX Spot Bot Optimizada (1h + Trailing Stop)",
+        "symbol": SYMBOL,
+        "timeframe": TIMEFRAME
+    }), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
