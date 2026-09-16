@@ -8,33 +8,34 @@ from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# Configuración de parámetros de la estrategia
-SYMBOL = 'BTC/USDT'      # Par a operar
-TIMEFRAME = '15m'        # Temporalidad del gráfico
-AMOUNT_USDT = 17         # Capital por operación en USDT
-CHECK_INTERVAL = 60      # Revisar el mercado cada 60 segundos
+# Configuración de parámetros
+SYMBOL = 'BTC/USDT'
+TIMEFRAME = '15m'
+AMOUNT_USDT = 17
+CHECK_INTERVAL = 60
 
-# Gestión de Riesgo (Porcentajes)
-STOP_LOSS_PCT = 0.02     # 2% de pérdida máxima
-TAKE_PROFIT_PCT = 0.04   # 4% de ganancia objetivo
+STOP_LOSS_PCT = 0.02
+TAKE_PROFIT_PCT = 0.04
 
-# Parámetros de Filtros (Optimizados para BTC/USDT 15m)
-ADX_LENGTH = 11          # Periodos para ADX (11 o 14)
-ADX_THRESHOLD = 23       # Mínima fuerza de tendencia para operar (Evita rangos)
+ADX_LENGTH = 11
+ADX_THRESHOLD = 23
 
-RSI_LENGTH = 14          # Periodos para RSI
-RSI_MIN_BUY = 50         # Requiere fuerza alcista real
-RSI_MAX_BUY = 68         # Evita comprar en zonas de sobrecompra
+RSI_LENGTH = 14
+RSI_MIN_BUY = 50
+RSI_MAX_BUY = 68
 
 entry_price = None
 
 def calculate_adx_and_rsi(df, adx_len=11, rsi_len=14):
-    """Calcula ADX y RSI de forma nativa con pandas/numpy"""
+    """Calcula ADX y RSI de forma nativa controlando divisiones por cero"""
     # 1. RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=rsi_len).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_len).mean()
-    rs = gain / loss
+    
+    # Evitar división por cero en RS
+    loss_safe = np.where(loss == 0, 1e-9, loss)
+    rs = gain / loss_safe
     df['rsi'] = 100 - (100 / (1 + rs))
 
     # 2. ADX
@@ -50,16 +51,20 @@ def calculate_adx_and_rsi(df, adx_len=11, rsi_len=14):
     df['minus_dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
 
     tr_s = df['tr'].ewm(alpha=1/adx_len, adjust=False).mean()
-    plus_di = 100 * (df['plus_dm'].ewm(alpha=1/adx_len, adjust=False).mean() / tr_s)
-    minus_di = 100 * (df['minus_dm'].ewm(alpha=1/adx_len, adjust=False).mean() / tr_s)
+    tr_s_safe = np.where(tr_s == 0, 1e-9, tr_s)
 
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
+    plus_di = 100 * (df['plus_dm'].ewm(alpha=1/adx_len, adjust=False).mean() / tr_s_safe)
+    minus_di = 100 * (df['minus_dm'].ewm(alpha=1/adx_len, adjust=False).mean() / tr_s_safe)
+
+    di_sum = plus_di + minus_di
+    di_sum_safe = np.where(di_sum == 0, 1e-9, di_sum)
+
+    dx = 100 * (abs(plus_di - minus_di) / di_sum_safe)
     df['adx'] = dx.ewm(alpha=1/adx_len, adjust=False).mean()
     
     return df
 
 def get_exchange():
-    """Inicializa la conexión con OKX usando variables de entorno"""
     return ccxt.okx({
         'apiKey': os.environ.get("OKX_API_KEY"),
         'secret': os.environ.get("OKX_SECRET_KEY"),
@@ -68,24 +73,30 @@ def get_exchange():
         'options': {'defaultType': 'spot'}
     })
 
+def fetch_last_buy_price(exchange):
+    """Recupera el precio de la última compra si el servidor se reinició"""
+    try:
+        trades = exchange.fetch_my_trades(SYMBOL, limit=5)
+        for trade in reversed(trades):
+            if trade['side'] == 'buy':
+                return float(trade['price'])
+    except Exception as e:
+        print(f"[WARN] No se pudo recuperar precio de entrada: {e}", flush=True)
+    return None
+
 def check_strategy_and_trade():
-    """Calcula indicadores, gestiona SL/TP y ejecuta órdenes en OKX Spot"""
     global entry_price
     
     try:
         exchange = get_exchange()
         exchange.load_markets()
 
-        # 1. Obtener las últimas 250 velas de OKX
         bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=250)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         
-        # 2. Calcular indicadores
         df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
         df['sma200'] = df['close'].rolling(window=200).mean()
-        
-        # Agregar ADX y RSI
         df = calculate_adx_and_rsi(df, adx_len=ADX_LENGTH, rsi_len=RSI_LENGTH)
 
         current_price = float(df['close'].iloc[-1])
@@ -101,20 +112,13 @@ def check_strategy_and_trade():
         last_adx = float(df['adx'].iloc[-2])
         last_rsi = float(df['rsi'].iloc[-2])
 
-        # 3. Condiciones de Estrategia
         crossover = (prev_ema9 <= prev_ema21) and (last_ema9 > last_ema21)
         crossunder = (prev_ema9 >= prev_ema21) and (last_ema9 < last_ema21)
         
-        # Filtros de Calidad
         trend_filter = last_close > last_sma200
         adx_filter = last_adx >= ADX_THRESHOLD
         rsi_filter = (RSI_MIN_BUY <= last_rsi <= RSI_MAX_BUY)
 
-        # Log de Monitoreo
-        print(f"[CHECK] BTC: ${current_price:,.2f} | ADX: {last_adx:.1f} | RSI: {last_rsi:.1f} | "
-              f"Macro: {trend_filter} | ADX OK: {adx_filter} | RSI OK: {rsi_filter}", flush=True)
-
-        # 4. Consultar saldo Spot
         balance = exchange.fetch_balance()
         base_coin = SYMBOL.split('/')[0]
         coin_balance = float(balance['free'].get(base_coin, 0.0))
@@ -123,38 +127,40 @@ def check_strategy_and_trade():
         min_amount = float(exchange.market(SYMBOL)['limits']['amount']['min'])
         has_position = coin_balance >= min_amount
 
-        # --- GESTIÓN DE POSICIÓN ABIERTA (SL / TP) ---
+        # Recuperar entry_price si hubo un restart
+        if has_position and entry_price is None:
+            entry_price = fetch_last_buy_price(exchange)
+            print(f"[RECOVERY] Posición detectada. Precio de compra recuperado: ${entry_price}", flush=True)
+
+        print(f"[CHECK] BTC: ${current_price:,.2f} | ADX: {last_adx:.1f} | RSI: {last_rsi:.1f} | "
+              f"Macro: {trend_filter} | ADX OK: {adx_filter} | RSI OK: {rsi_filter}", flush=True)
+
+        # GESTIÓN DE POSICIÓN ABIERTA (SL / TP)
         if has_position and entry_price is not None:
             price_change = (current_price - entry_price) / entry_price
 
-            if price_change <= -STOP_LOSS_PCT:
+            if price_change <= -STOP_LOSS_PCT or price_change >= TAKE_PROFIT_PCT:
+                action = "STOP LOSS" if price_change <= -STOP_LOSS_PCT else "TAKE PROFIT"
                 sell_amount = exchange.amount_to_precision(SYMBOL, coin_balance)
-                print(f"[STOP LOSS] Caída del {price_change*100:.2f}%. Vendiendo {sell_amount} {base_coin}...", flush=True)
+                print(f"[{action}] Cambio: {price_change*100:.2f}%. Vendiendo {sell_amount} {base_coin}...", flush=True)
                 order = exchange.create_market_sell_order(SYMBOL, sell_amount)
                 print(f"Orden ejecutada: {order['id']}", flush=True)
                 entry_price = None
                 return
 
-            elif price_change >= TAKE_PROFIT_PCT:
-                sell_amount = exchange.amount_to_precision(SYMBOL, coin_balance)
-                print(f"[TAKE PROFIT] Subida del {price_change*100:.2f}%. Vendiendo {sell_amount} {base_coin}...", flush=True)
-                order = exchange.create_market_sell_order(SYMBOL, sell_amount)
-                print(f"Orden ejecutada: {order['id']}", flush=True)
-                entry_price = None
-                return
-
-        # --- SEÑAL DE COMPRA FILTRADA ---
+        # SEÑAL DE COMPRA FILTRADA
         if crossover and trend_filter and adx_filter and rsi_filter and not has_position:
             if usdt_balance >= AMOUNT_USDT:
-                print(f"[SEÑAL COMPRA] Cruce alcista validado por ADX ({last_adx:.1f}) y RSI ({last_rsi:.1f}). Comprando...", flush=True)
+                print(f"[SEÑAL COMPRA] Validada. Comprando...", flush=True)
                 raw_amount = AMOUNT_USDT / current_price
                 target_amount = exchange.amount_to_precision(SYMBOL, raw_amount)
 
                 order = exchange.create_market_buy_order(SYMBOL, target_amount)
-                print(f"Orden de compra ejecutada: {order['id']}", flush=True)
-                entry_price = current_price
+                # Tomar el precio real ejecutado si está disponible en la respuesta del exchange
+                entry_price = float(order.get('price', current_price)) or current_price
+                print(f"Orden de compra ejecutada: {order['id']} a ${entry_price}", flush=True)
 
-        # --- SEÑAL DE VENTA POR CRUCE BAJISTA ---
+        # SEÑAL DE VENTA POR CRUCE BAJISTA
         elif crossunder and has_position:
             sell_amount = exchange.amount_to_precision(SYMBOL, coin_balance)
             print(f"[SEÑAL VENTA] Cruce bajista en {SYMBOL}. Vendiendo...", flush=True)
@@ -174,7 +180,6 @@ def bot_loop():
             print(f"Error en bot_loop: {e}", flush=True)
         time.sleep(CHECK_INTERVAL)
 
-# Arrancar el hilo secundario
 Thread(target=bot_loop, daemon=True).start()
 
 @app.route('/')
