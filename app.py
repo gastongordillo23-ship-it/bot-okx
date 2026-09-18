@@ -6,20 +6,12 @@ import ccxt
 import pandas as pd
 import numpy as np
 
-# --- CONFIGURACIÓN DE FLASK (HEALTH CHECK EN RENDER) ---
+# --- CONFIGURACIÓN DE FLASK (Gunicorn se encarga de servirlo) ---
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
     return "Bot de trading OKX activo y en ejecución.", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-# Iniciar servidor web en hilo secundario para UptimeRobot / Render
-flask_thread = threading.Thread(target=run_flask, daemon=True)
-flask_thread.start()
 
 # --- CONFIGURACIÓN DEL BOT & OKX ---
 API_KEY = os.environ.get("OKX_API_KEY")
@@ -200,9 +192,13 @@ def run_strategy():
     except Exception as e:
         print(f"[ERROR INESPERADO] {e}", flush=True)
 
-# --- BUCLE PRINCIPAL ---
-if __name__ == "__main__":
+def start_bot_loop():
+    """Inicia el bucle de trading en segundo plano."""
     print("Bot OKX 4H iniciado y monitoreando...", flush=True)
     while True:
         run_strategy()
         time.sleep(300)
+
+# Iniciar la lógica del bot en un hilo en segundo plano cuando Gunicorn cargue el archivo
+bot_thread = threading.Thread(target=start_bot_loop, daemon=True)
+bot_thread.start()
