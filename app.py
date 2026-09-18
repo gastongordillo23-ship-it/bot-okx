@@ -4,7 +4,7 @@ import threading
 from flask import Flask
 import ccxt
 import pandas as pd
-import ta  # Librería estándar 'ta' en lugar de 'pandas_ta'
+import numpy as np
 
 # --- CONFIGURACIÓN DE FLASK (HEALTH CHECK EN RENDER) ---
 app = Flask(__name__)
@@ -46,20 +46,51 @@ try:
 except Exception as e:
     print(f"Error al cargar mercados iniciales: {e}", flush=True)
 
+# --- CÁLCULO NATIVO DE INDICADORES (CON PANDAS / NUMPY) ---
+def calculate_indicators(df):
+    """Calcula indicadores técnicos usando únicamente pandas y numpy nativos."""
+    # EMA y SMA
+    df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+    df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
+    df['sma200'] = df['close'].rolling(window=200).mean()
+
+    # RSI (14)
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['rsi'] = 100 - (100 / (1 + rs))
+
+    # ATR (14)
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['atr'] = tr.rolling(window=14).mean()
+
+    # ADX (14)
+    up_move = df['high'].diff()
+    down_move = -df['low'].diff()
+
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    atr_smooth = tr.rolling(window=14).mean()
+    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14).mean() / atr_smooth)
+    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14).mean() / atr_smooth)
+
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
+    df['adx'] = dx.rolling(window=14).mean()
+
+    return df
+
 def fetch_data():
-    """Obtiene velas de 4H y calcula indicadores técnicos con la librería 'ta'."""
+    """Obtiene velas de 4H y procesa los indicadores."""
     ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=300)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
 
-    # Indicadores Técnicos con 'ta'
-    df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
-    df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
-    df['sma200'] = ta.trend.sma_indicator(df['close'], window=200)
-    df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
-    df['rsi'] = ta.momentum.rsi(df['close'], window=14)
-    df['adx'] = ta.trend.adx(df['high'], df['low'], df['close'], window=14)
-
+    df = calculate_indicators(df)
     return df
 
 def get_market_limits():
