@@ -3,7 +3,6 @@ import os
 import threading
 from flask import Flask
 import ccxt
-import ccxt.base.errors as ccxt_errors
 import pandas as pd
 import pandas_ta as ta
 
@@ -40,7 +39,7 @@ exchange = ccxt.okx({
     'options': {'defaultType': 'spot'}
 })
 
-# OPTIMIZACIÓN 1: Cargar mercados una sola vez al inicializar
+# Cargar mercados una sola vez al inicializar
 try:
     print("Cargando mercados de OKX...", flush=True)
     exchange.load_markets()
@@ -84,9 +83,7 @@ def run_strategy():
             print("Datos insuficientes para SMA200. Esperando más velas.", flush=True)
             return
 
-        # ----------------------------------------------------
         # 1. VELAS CONFIRMADAS / CERRADAS
-        # ----------------------------------------------------
         prev_closed = df.iloc[-3]  # Vela cerrada hace 2 períodos
         last_closed = df.iloc[-2]  # Última vela cerrada (confirmada)
 
@@ -100,19 +97,14 @@ def run_strategy():
         ema_crossover = (prev_closed['ema9'] <= prev_closed['ema21']) and (last_closed['ema9'] > last_closed['ema21'])
         ema_crossunder = (prev_closed['ema9'] >= prev_closed['ema21']) and (last_closed['ema9'] < last_closed['ema21'])
 
-        # ----------------------------------------------------
-        # 2. PRECIO Y SALDOS (OPTIMIZACIÓN RATE LIMITS)
-        # ----------------------------------------------------
-        # Se toma el precio de cierre de la vela en formación para ahorrar llamadas
+        # 2. PRECIO Y SALDOS
         live_price = float(df.iloc[-1]['close'])
 
         balance = exchange.fetch_balance()
         usdt_balance = float(balance['free'].get('USDT', 0.0))
         btc_balance = float(balance['free'].get('BTC', 0.0))
 
-        # ----------------------------------------------------
         # 3. COMPRA SPOT (ENTRADA)
-        # ----------------------------------------------------
         if ema_crossover and trend_filter and strength_filter and rsi_filter:
             print("[SEÑAL COMPRA] Condición alcista confirmada.", flush=True)
 
@@ -126,18 +118,16 @@ def run_strategy():
 
             target_usdt = min(target_usdt, usdt_balance)
 
-            # Validar límites de mercado reales de OKX
             min_amount, min_cost = get_market_limits()
             raw_btc_amount = target_usdt / live_price
             formatted_amount = float(exchange.amount_to_precision(SYMBOL, raw_btc_amount))
 
-            # OPTIMIZACIÓN 2: Validación estricta con el monto ya formateado
             if target_usdt >= min_cost and formatted_amount >= min_amount:
                 print(f"Ejecutando COMPRA: {formatted_amount} BTC (~${target_usdt:.2f} USDT)", flush=True)
                 order = exchange.create_market_buy_order(SYMBOL, formatted_amount)
                 print("Orden de compra realizada con éxito. ID:", order['id'], flush=True)
 
-                # OPTIMIZACIÓN 3: Orden de Stop Loss automática en OKX
+                # Stop Loss automático en OKX
                 stop_loss_price = live_price - stop_distance_usdt
                 formatted_sl_price = exchange.price_to_precision(SYMBOL, stop_loss_price)
 
@@ -149,16 +139,14 @@ def run_strategy():
                     amount=formatted_amount,
                     params={
                         'triggerPrice': formatted_sl_price,
-                        'orderPrice': '-1'  # Exec a precio de mercado al activarse
+                        'orderPrice': '-1'
                     }
                 )
                 print("Stop Loss configurado exitosamente. ID:", sl_order['id'], flush=True)
             else:
-                print(f"Monto (${target_usdt:.2f} USDT) por debajo del mínimo de OKX (Min USDT: {min_cost}, Min BTC: {min_amount}).", flush=True)
+                print(f"Monto (${target_usdt:.2f} USDT) por debajo del mínimo de OKX.", flush=True)
 
-        # ----------------------------------------------------
-        # 4. VENTA SPOT (SALIDA POR CRUCE)
-        # ----------------------------------------------------
+        # 4. VENTA SPOT (SALIDA)
         elif ema_crossunder and btc_balance > 0:
             print("[SEÑAL VENTA] Cruce bajista confirmado.", flush=True)
             
@@ -175,12 +163,11 @@ def run_strategy():
         else:
             print(f"[CHECK 4H] BTC: ${live_price:,.2f} | Sin señal de entrada/salida.", flush=True)
 
-    # OPTIMIZACIÓN 5: Manejo de errores específicos
-    except ccxt_errors.InsufficientFunds as e:
+    except ccxt.InsufficientFunds as e:
         print(f"[ERROR OKX] Saldo insuficiente para operar: {e}", flush=True)
-    except ccxt_errors.NetworkError as e:
+    except ccxt.NetworkError as e:
         print(f"[ERROR RED] Error de conexión con OKX: {e}", flush=True)
-    except ccxt_errors.ExchangeError as e:
+    except ccxt.ExchangeError as e:
         print(f"[ERROR API OKX] Rechazo por parte de OKX: {e}", flush=True)
     except Exception as e:
         print(f"[ERROR INESPERADO] {e}", flush=True)
@@ -190,4 +177,4 @@ if __name__ == "__main__":
     print("Bot OKX 4H iniciado y monitoreando...", flush=True)
     while True:
         run_strategy()
-        time.sleep(300)  # Verificación cada 5 minutos
+        time.sleep(300)
