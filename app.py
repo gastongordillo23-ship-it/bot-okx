@@ -4,7 +4,7 @@ import threading
 from flask import Flask
 import ccxt
 import pandas as pd
-import pandas_ta as ta
+import ta  # Librería estándar 'ta' en lugar de 'pandas_ta'
 
 # --- CONFIGURACIÓN DE FLASK (HEALTH CHECK EN RENDER) ---
 app = Flask(__name__)
@@ -47,21 +47,18 @@ except Exception as e:
     print(f"Error al cargar mercados iniciales: {e}", flush=True)
 
 def fetch_data():
-    """Obtiene velas de 4H y calcula indicadores técnicos."""
+    """Obtiene velas de 4H y calcula indicadores técnicos con la librería 'ta'."""
     ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=300)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
 
-    # Indicadores Técnicos
-    df['ema9'] = ta.ema(df['close'], length=9)
-    df['ema21'] = ta.ema(df['close'], length=21)
-    df['sma200'] = ta.sma(df['close'], length=200)
-    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-    df['rsi'] = ta.rsi(df['close'], length=14)
-    
-    # ADX
-    adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
-    df['adx'] = adx_df['ADX_14'] if adx_df is not None and 'ADX_14' in adx_df else 0
+    # Indicadores Técnicos con 'ta'
+    df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
+    df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
+    df['sma200'] = ta.trend.sma_indicator(df['close'], window=200)
+    df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
+    df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+    df['adx'] = ta.trend.adx(df['high'], df['low'], df['close'], window=14)
 
     return df
 
